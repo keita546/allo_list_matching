@@ -42,10 +42,15 @@ def select_output_folder(title="結果を保存するフォルダを選択して
     root.destroy()
     return Path(folder_path) if folder_path else None
 
-# --- 1. 花王データ読み込み関数 ---
+# --- 1. 花王データ読み込み関数（修復機能付き） ---
 def load_kao(path):
-    df = pd.read_excel(path, usecols=[6, 14, 41, 43], skiprows=5, header=None, engine='openpyxl',
-                        dtype={14: str, 41: str}) 
+    df = load_with_repair(
+        path, 
+        usecols=[6, 14, 41, 43], 
+        skiprows=5, 
+        header=None,
+        dtype={14: str, 41: str}
+    )
     df.columns = ['新商品名', '新JAN', '旧JAN', '旧商品名']
     df = df.dropna(subset=['旧JAN', '新JAN'])[['旧JAN', '旧商品名', '新JAN', '新商品名']]
     df['備考'] = path.name
@@ -80,7 +85,7 @@ def extract_unmatched(new_df, old_df):
 def exclude_kao(df, is_kao_col):
     return df[~df[is_kao_col].astype(str).str.startswith('4901301') & ~df[is_kao_col].astype(str).str.contains('花王株式会社')]
 
-# --- 5. プラネット差し替えリスト生成 ---
+# --- 5. プラネット差し替えリスト生成（修復機能付き） ---
 def process_planet_diff(planet_paths_dict):
     result = []
     for season, paths in planet_paths_dict.items():
@@ -88,37 +93,47 @@ def process_planet_diff(planet_paths_dict):
         if 'new' not in paths or 'disc' not in paths:
             print(f"⚠️ {season}のプラネットデータが不完全です（スキップ）")
             continue
+        
+        try:
+            new_df = load_with_repair(
+                paths['new'],
+                dtype={'ＪＡＮコード': str, '旧ＪＡＮコード': str}
+            )
+            disc_df = load_with_repair(
+                paths['disc'],
+                dtype={'JANコード': str, '新JANコード': str, '廃番予定品': str, '新商品名': str}
+            )
+
+            new_df['備考'] = paths['new'].name
+            disc_df['備考'] = paths['disc'].name
+
+            new_df = exclude_kao(new_df, 'メーカーコード')
+            disc_df = exclude_kao(disc_df, 'メーカー')
             
-        new_df = pd.read_excel(paths['new'], engine='openpyxl',
-                                 dtype={'ＪＡＮコード': str, '旧ＪＡＮコード': str})
-        disc_df = pd.read_excel(paths['disc'], engine='openpyxl',
-                                 dtype={'JANコード': str, '新JANコード': str, '廃番予定品': str, '新商品名': str})
+            new_clean = clean_planet(new_df, 'new')
+            disc_clean = clean_planet(disc_df, 'discontinue')
 
-        new_df['備考'] = paths['new'].name
-        disc_df['備考'] = paths['disc'].name
+            disc_not_in_new_by_new_jan = disc_clean[
+                ~disc_clean['新JAN'].isin(new_clean['新JAN'])
+            ].copy()
 
-        new_df = exclude_kao(new_df, 'メーカーコード')
-        disc_df = exclude_kao(disc_df, 'メーカー')
-        
-        new_clean = clean_planet(new_df, 'new')
-        disc_clean = clean_planet(disc_df, 'discontinue')
+            final_disc_additions = disc_not_in_new_by_new_jan[
+                ~disc_not_in_new_by_new_jan['旧JAN'].isin(new_clean['旧JAN'])
+            ].copy()
 
-        disc_not_in_new_by_new_jan = disc_clean[
-            ~disc_clean['新JAN'].isin(new_clean['新JAN'])
-        ].copy()
-
-        final_disc_additions = disc_not_in_new_by_new_jan[
-            ~disc_not_in_new_by_new_jan['旧JAN'].isin(new_clean['旧JAN'])
-        ].copy()
-
-        pure_new_items = extract_unmatched(new_clean, disc_clean)
-        combined_planet_diff = pd.concat([pure_new_items, final_disc_additions], ignore_index=True)
-        
-        combined_planet_diff_with_notes = pd.merge(combined_planet_diff, new_df[['JANコード', '備考']], 
-                                                   left_on='新JAN', right_on='JANコード', how='left')
-        combined_planet_diff_with_notes = combined_planet_diff_with_notes.drop(columns='JANコード').rename(columns={'備考': '新JAN備考'})
-        
-        result.append(combined_planet_diff_with_notes)
+            pure_new_items = extract_unmatched(new_clean, disc_clean)
+            combined_planet_diff = pd.concat([pure_new_items, final_disc_additions], ignore_index=True)
+            
+            combined_planet_diff_with_notes = pd.merge(combined_planet_diff, new_df[['JANコード', '備考']], 
+                                                       left_on='新JAN', right_on='JANコード', how='left')
+            combined_planet_diff_with_notes = combined_planet_diff_with_notes.drop(columns='JANコード').rename(columns={'備考': '新JAN備考'})
+            
+            result.append(combined_planet_diff_with_notes)
+            print(f"✅ {season}の処理完了（{len(combined_planet_diff_with_notes)}件）")
+            
+        except Exception as e:
+            print(f"❌ {season}の処理に失敗しました: {e}")
+            continue
     
     if result:
         return pd.concat(result, ignore_index=True)
@@ -243,23 +258,21 @@ def main():
     final_df.to_csv(output_dir / "花王・プラネット差し替えリスト完成版.csv", index=False, encoding='cp932', errors='replace')
     final_df.to_excel(output_dir / "花王・プラネット差し替えリスト完成版.xlsx", index=False, engine='openpyxl')
     
-    summary = f
-    """
-    差し替えリスト作成完了
-    
-    【処理内容】
-    花王: {len(all_kao_file_paths)}ファイル
-    プラネット: {len(planet_paths_selected)}期間
-    最終件数: {len(final_df)}件
-    
-    【出力先】
-    {output_dir}
-    
-    【ファイル】
-    - 花王・プラネット差し替えリスト完成版.csv
-    - 花王・プラネット差し替えリスト完成版.xlsx
-    
-    """
+    summary = f"""
+🎉 差し替えリスト作成完了！
+
+【処理内容】
+花王: {len(all_kao_file_paths)}ファイル
+プラネット: {len(planet_paths_selected)}期間
+最終件数: {len(final_df)}件
+
+【出力先】
+{output_dir}
+
+【ファイル】
+- 花王・プラネット差し替えリスト完成版.csv
+- 花王・プラネット差し替えリスト完成版.xlsx
+"""
     
     print(summary)
     messagebox.showinfo("完了", summary, icon='info')
