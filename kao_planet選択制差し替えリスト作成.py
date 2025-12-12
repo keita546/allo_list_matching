@@ -16,7 +16,7 @@ from tkinter import filedialog, messagebox
 import os
 
 # --- 0. 設定と初期化 ---
-ROOT_DIR = Path(os.path.expanduser("~")/"Box/D0RM_RM_130_リテールテクノロジー研究部/新/103_棚割/002_Allo/001_社内/002_マニュアル関連/差し替えリスト/差し替えリスト出力先（バックアップ版）") 
+ROOT_DIR = Path(os.path.expanduser("~"))/"C:/Users/337475/Box/D0RM_RM_130_リテールテクノロジー研究部/新/103_棚割/002_Allo/001_社内/009_差し替えリスト関連/001_kao・planetリスト作成/03_アウトプット"
 
 # --- GUIでファイルを選択する関数 ---
 def select_files(title, filetypes, multiple=False):
@@ -42,6 +42,43 @@ def select_output_folder(title="結果を保存するフォルダを選択して
     root.destroy()
     return Path(folder_path) if folder_path else None
 
+# --- Excel/CSV読み込み関数（修復機能付き） ---
+def load_with_repair(path, **kwargs):
+    """
+    Excelファイルを読み込む。エラー時は修復を試みる。
+    
+    Parameters
+    ----------
+    path : Path or str
+        読み込むファイルのパス
+    **kwargs : dict
+        pd.read_excelに渡す引数
+    
+    Returns
+    -------
+    DataFrame
+        読み込んだデータ
+    """
+    try:
+        # 通常読み込み
+        df = pd.read_excel(path, **kwargs)
+        return df
+    except Exception as e:
+        print(f"⚠️ 読み込みエラー（修復試行中）: {path.name}")
+        print(f"   エラー内容: {e}")
+        
+        try:
+            # エンジンを変更して再試行
+            if 'engine' not in kwargs:
+                kwargs['engine'] = 'openpyxl'
+            df = pd.read_excel(path, **kwargs)
+            print(f"✅ 修復成功: {path.name}")
+            return df
+        except Exception as e2:
+            print(f"❌ 修復失敗: {path.name}")
+            raise e2
+
+
 # --- 1. 花王データ読み込み関数（修復機能付き） ---
 def load_kao(path):
     df = load_with_repair(
@@ -54,6 +91,7 @@ def load_kao(path):
     df.columns = ['新商品名', '新JAN', '旧JAN', '旧商品名']
     df = df.dropna(subset=['旧JAN', '新JAN'])[['旧JAN', '旧商品名', '新JAN', '新商品名']]
     df['備考'] = path.name
+    df['データソース'] = '花王'
     return df
 
 # --- 2. プラネットクレンジング関数 ---
@@ -88,7 +126,22 @@ def exclude_kao(df, is_kao_col):
 # --- 5. プラネット差し替えリスト生成（修復機能付き） ---
 def process_planet_diff(planet_paths_dict):
     result = []
-    for season, paths in planet_paths_dict.items():
+    
+    # ファイルの更新日時で降順ソート（新しいファイルが上）
+    sorted_seasons = sorted(
+        planet_paths_dict.items(),
+        key=lambda x: x[1]['new'].stat().st_mtime,  # 新規品ファイルの更新日時
+        reverse=True  # 新しいものが先
+    )
+    
+    # ソート結果を表示
+    print("\n📅 処理順序（新しい順）:")
+    for i, (season, paths) in enumerate(sorted_seasons, 1):
+        mtime = paths['new'].stat().st_mtime
+        date_str = pd.Timestamp(mtime, unit='s').strftime('%Y/%m/%d %H:%M')
+        print(f"  {i}. {season} (ファイル日付: {date_str})")
+    
+    for season, paths in sorted_seasons:
         # 新規品と廃番品の両方が揃っている場合のみ処理
         if 'new' not in paths or 'disc' not in paths:
             print(f"⚠️ {season}のプラネットデータが不完全です（スキップ）")
@@ -128,6 +181,8 @@ def process_planet_diff(planet_paths_dict):
                                                        left_on='新JAN', right_on='JANコード', how='left')
             combined_planet_diff_with_notes = combined_planet_diff_with_notes.drop(columns='JANコード').rename(columns={'備考': '新JAN備考'})
             
+            combined_planet_diff_with_notes['データソース'] = 'プラネット'
+            
             result.append(combined_planet_diff_with_notes)
             print(f"✅ {season}の処理完了（{len(combined_planet_diff_with_notes)}件）")
             
@@ -139,6 +194,7 @@ def process_planet_diff(planet_paths_dict):
         return pd.concat(result, ignore_index=True)
     else:
         return pd.DataFrame()
+
 
 # --- 6. クリーンアップ処理 ---
 def finalize(df):
@@ -154,6 +210,12 @@ def finalize(df):
     df['新商品名'] = df['新商品名'].replace('', '該当文字列なし')
 
     return df[df['旧JANコード'] != df['新JANコード']].drop_duplicates()
+
+    # ★★★ ここでカラム順を制御 ★★★
+    output_columns = ['データソース', '旧JANコード', '旧商品名', '新JANコード', '新商品名', '新JAN備考']
+    existing_columns = [col for col in output_columns if col in df.columns]
+    
+    return df[existing_columns]  # ← 指定した順番で返す
 
 # --- 7. メイン処理 ---
 def main():
@@ -227,10 +289,26 @@ def main():
     # --- データ処理開始 ---
     combined_df = pd.DataFrame()
 
-    # 花王データ処理
+ # 花王データ処理
     if all_kao_file_paths:
         print("\n🔄 花王データ処理中...")
-        kao_df = pd.concat([load_kao(p) for p in all_kao_file_paths], ignore_index=True)
+        
+        # ★★★ ここが重要：ファイルの更新日時で降順ソート ★★★
+        sorted_kao_paths = sorted(
+            all_kao_file_paths,
+            key=lambda x: x.stat().st_mtime,
+            reverse=True  # 新しいファイルが先
+        )
+        
+        # ソート結果を表示
+        print("\n📅 花王ファイル処理順序（新しい順）:")
+        for i, path in enumerate(sorted_kao_paths, 1):
+            mtime = path.stat().st_mtime
+            date_str = pd.Timestamp(mtime, unit='s').strftime('%Y/%m/%d %H:%M')
+            print(f"  {i}. {path.name} (ファイル日付: {date_str})")
+        
+        # ★★★ ソート済みのリストで処理 ★★★
+        kao_df = pd.concat([load_kao(p) for p in sorted_kao_paths], ignore_index=True)
         kao_df = kao_df.rename(columns={'備考': '新JAN備考'})
         combined_df = pd.concat([combined_df, kao_df], ignore_index=True)
         print(f"✅ 花王: {len(kao_df)}件")

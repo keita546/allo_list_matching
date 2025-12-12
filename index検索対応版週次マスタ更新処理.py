@@ -61,7 +61,7 @@ def load_data(file_path: str, suffix: str) -> pd.DataFrame:
     
     required_cols = [
         'メーカーコード', 'ブランドコード', '標準分類コード(タイプ)',
-        '目付', 'ブランド名称', '標準分類名(クラス)',
+        '目付', 'ブランド名称', '標準分類名(タイプ)',
         '商品名称（カナ）', 'JANコード', 'メーカー名称',
     ]
     
@@ -78,11 +78,11 @@ def load_data(file_path: str, suffix: str) -> pd.DataFrame:
 
 
 def get_weight_range(weight):
-    # 目的: 目付（重さ）の値から、許容される範囲（±10%）を計算する。
-    # 理由: 厳密な値ではなく、少しの誤差（±10%）は許容してマッチングさせるため。
+    # 目的: 目付（重さ）の値から、許容される範囲（±20%）を計算する。
+    # 理由: 厳密な値ではなく、少しの誤差（±20%）は許容してマッチングさせるため。
     try:
         w = float(weight)
-        return w * 0.9, w * 1.1
+        return w * 0.8, w * 1.2
     except (ValueError, TypeError):
         # 理由: 目付が不明な場合は、この機能ではフィルタリングしないようにするため（Noneを返す）。
         return None, None
@@ -175,7 +175,7 @@ def process_master_data(old_path: str, new_path: str, output_dir: str):
         final_df = pd.concat([df_new.reset_index(drop=True), analysis_result], axis=1)
         
         final_df = final_df.rename(columns={
-            '標準分類名(クラス)_新': '標準分類(クラス)_新',
+            '標準分類名(タイプ)_新': '標準分類(タイプ)_新',
         }, errors='ignore')
         
         if '候補あり' in final_df.columns:
@@ -184,11 +184,11 @@ def process_master_data(old_path: str, new_path: str, output_dir: str):
             final_df = final_df.drop('候補あり', axis=1)
         
         report_columns = [
-            '照合結果', 'JANコード_旧','商品名称（カナ）_旧','メーカー名称_旧','標準分類(クラス)_旧', 
-            'ブランド名称_旧','目付_旧','発売日_旧','最高類似度','判定',
-            'JANコード_新','商品名称（カナ）_新','メーカー名称_新','標準分類(クラス)_新', 
-            'ブランド名称_新','目付_新',
-            '候補', 'スキップ理由',
+            '照合結果', 'JANコード_旧','商品名称（カナ）_旧','商品名称（漢字）_旧','メーカー名称_旧','標準分類(タイプ)_旧', 
+            'ブランド名称_旧','目付_旧','幅_旧','高さ_旧','奥行_旧','最高類似度','判定',
+            'JANコード_新','商品名称（カナ）_新','商品名称（漢字）_新','メーカー名称_新','標準分類(タイプ)_新', 
+            'ブランド名称_新','目付_新','発売日_新',
+            '幅_新','高さ_新','奥行_新','候補','パターン'
         ]
         
         existing_columns = [col for col in report_columns if col in final_df.columns]
@@ -240,9 +240,11 @@ def find_best_match(new_row: pd.Series,
     
     skip_reasons = []
     matching_old = None
+    pattern_name = '不明'  # ← ここで初期化を追加！
     
     # パターン1: ブランドあり
     if new_brand:
+        pattern_name = 'ブランドのみ'  # ← デフォルトを先に設定
         # 操作: ブランドコードをキーとしてインデックス検索（df.loc[]）を行う。
         # 理由: 旧マスタ全体をチェックするのではなく、インデックスを使って一致する行だけを効率よく抽出するため。
         try:
@@ -280,11 +282,15 @@ def find_best_match(new_row: pd.Series,
                         '最高類似度': 0.0, '判定': '✕', '候補': '', 'スキップ理由': '', '候補あり': False
                     }
                 matching_old = weight_filtered
+                pattern_name = 'ブランド+目付'  # ← パターン名設定
+
         else:
             skip_reasons.append('目付スキップ')
+            pattern_name = 'ブランドのみ'  # ← パターン名設定
     
     # パターン2: ブランドなし → メーカー名称+タイプ
     elif new_maker_name and new_type:
+        pattern_name = 'メーカー名称+タイプのみ'  # ← デフォルトを先に設定
         # 操作: メーカー名称とタイプコードの複合キー（タプル）でインデックス検索を行う。
         # 理由: 複合キー（組み合わせ）が一致する行を効率よく抽出するため。
         try:
@@ -321,8 +327,10 @@ def find_best_match(new_row: pd.Series,
                         '最高類似度': 0.0, '判定': '✕', '候補': '', 'スキップ理由': '', '候補あり': False
                     }
                 matching_old = weight_filtered
+                pattern_name = 'メーカー名称+タイプ+目付'  # ← パターン名設定
         else:
             skip_reasons.append('目付スキップ')
+            pattern_name = 'メーカー名称+タイプのみ'  # ← パターン名設定
     
     else:
         # 理由: マッチングに必要なキーコード（ブランド、またはメーカー+タイプ）が不足している場合、候補なしとする。
@@ -360,7 +368,7 @@ def find_best_match(new_row: pd.Series,
     else:
         result = '低類似度 (80%未満・要手動確認)'
         judgment = '✕'
-    
+
     return {
         '照合結果': result,
         '最高類似度': best_score,
@@ -371,10 +379,15 @@ def find_best_match(new_row: pd.Series,
         'JANコード_旧': best_old_row.get('JANコード_旧', ''),
         '商品名称（カナ）_旧': best_old_row.get('商品名称（カナ）_旧', ''),
         'メーカー名称_旧': best_old_row.get('メーカー名称_旧', ''),
-        '標準分類(クラス)_旧': best_old_row.get('標準分類名(クラス)_旧', ''),
+        '標準分類(タイプ)_旧': best_old_row.get('標準分類名(タイプ)_旧', ''),
         'ブランド名称_旧': best_old_row.get('ブランド名称_旧', ''),
         '目付_旧': best_old_row.get('目付_旧', ''),
         '発売日_旧': best_old_row.get('発売日_旧', ''),
+        '商品名称（漢字）_旧': best_old_row.get('商品名称（漢字）_旧', ''),
+        '幅_旧': best_old_row.get('幅_旧', ''),
+        '高さ_旧': best_old_row.get('高さ_旧', ''),
+        '奥行_旧': best_old_row.get('奥行_旧', ''),
+        'パターン': pattern_name
     }
 
 
@@ -384,7 +397,7 @@ def create_candidate_sheet_data(df_new, df_old_processed, df_old_original, resul
     candidates_list = []
     
     for idx, new_row in df_new.iterrows():
-        # ... (初期設定と候補なしスキップは省略) ...
+        # ... (初期設定と候補なしスキップは省略) ...        
         if idx % 100 == 0:
             print(f"候補品処理中... {idx}/{len(df_new)}")
         
@@ -395,6 +408,7 @@ def create_candidate_sheet_data(df_new, df_old_processed, df_old_original, resul
         new_brand = str(new_row.get('ブランドコード_新')).strip() if pd.notna(new_row.get('ブランドコード_新')) else None
         new_type = str(new_row.get('標準分類コード(タイプ)_新')).strip() if pd.notna(new_row.get('標準分類コード(タイプ)_新')) else None
         new_name = new_row.get('商品名称（カナ）_新', '')
+        new_kanji = new_row.get('商品名称（漢字）_新', '')
         new_weight = new_row.get('目付_新')
         
         if new_maker_name == 'nan': new_maker_name = None
@@ -403,114 +417,127 @@ def create_candidate_sheet_data(df_new, df_old_processed, df_old_original, resul
         
         new_jan = new_row.get('JANコード_新', '')
         new_maker_name_val = new_row.get('メーカー名称_新', '')
-        new_class = new_row.get('標準分類(クラス)_新', '')
+        new_type_name = new_row.get('標準分類名(タイプ)_新', '')  # タイプに変更
         new_brand_name = new_row.get('ブランド名称_新', '')
+        new_wide = new_row.get('幅_新', '')
+        new_height = new_row.get('高さ_新', '')
+        new_length = new_row.get('奥行_新', '')
+        new_release = new_row.get('発売日_新','')
         
-        all_matches = []
-        
+        matched_df = None
+        pattern_name = ''
+
         # 【旧品検索処理の高速化】: ブールインデックス検索（全行チェック）ではなく、インデックス検索（df.loc）を使用する。
         
-        # パターンA: ブランド+目付
+        # ===== 優先順位付きパターン選択 =====
+        
+        # パターンA: ブランド+目付（最優先）
         if new_brand and pd.notna(new_weight):
             min_w, max_w = get_weight_range(new_weight)
             if min_w and max_w:
                 try:
-                    # 操作: ブランドコードでインデックス検索（高速）。
-                    # 理由: ブランドコードが一致する候補群を高速に取得するため。
                     brand_matched = df_old_brands_indexed.loc[new_brand].copy()
                     if isinstance(brand_matched, pd.Series):
                         brand_matched = brand_matched.to_frame().T
                     
-                    # 操作: インデックス検索で見つけた候補に対して目付をフィルタリング。
-                    # 理由: ブランドが一致し、かつ目付の許容範囲内にある候補を絞り込むため。
                     pattern_a = brand_matched[
                         (brand_matched['目付_旧_float'] >= min_w) &
                         (brand_matched['目付_旧_float'] <= max_w)
                     ].copy()
-                    pattern_a['パターン'] = 'ブランド+目付'
-                    all_matches.append(pattern_a)
+                    
+                    if not pattern_a.empty:
+                        matched_df = pattern_a
+                        pattern_name = 'ブランド+目付'
                 except KeyError:
-                    pass # 候補なし
+                    pass
         
-        # パターンB: ブランドのみ
-        if new_brand:
+        # パターンB: ブランドのみ（Aがなければ）
+        if matched_df is None and new_brand:
             try:
-                # 操作: ブランドコードでインデックス検索（高速）。
-                # 理由: 目付を無視して、ブランドコードが一致するすべての候補を取得するため。
                 pattern_b = df_old_brands_indexed.loc[new_brand].copy()
                 if isinstance(pattern_b, pd.Series):
                     pattern_b = pattern_b.to_frame().T
-                pattern_b['パターン'] = 'ブランドのみ'
-                all_matches.append(pattern_b)
+                
+                if not pattern_b.empty:
+                    matched_df = pattern_b
+                    pattern_name = 'ブランドのみ'
             except KeyError:
-                pass # 候補なし
+                pass
         
-        # パターンC: メーカー名称+タイプ+目付
-        if new_maker_name and new_type and pd.notna(new_weight):
+        # パターンC: メーカー名称+タイプ+目付（A, Bがなければ）
+        if matched_df is None and new_maker_name and new_type and pd.notna(new_weight):
             min_w, max_w = get_weight_range(new_weight)
             if min_w and max_w:
                 try:
-                    # 操作: 複合キー（メーカー名称, タイプコード）でインデックス検索（高速）。
-                    # 理由: 複合キーで候補群を高速に取得するため。
                     multi_matched = df_old_multi_indexed.loc[(new_maker_name, new_type)].copy()
                     if isinstance(multi_matched, pd.Series):
                         multi_matched = multi_matched.to_frame().T
-                        
-                    # 操作: インデックス検索で見つけた候補に対して目付をフィルタリング。
-                    # 理由: 複合キーが一致し、かつ目付の許容範囲内にある候補を絞り込むため。
+                    
                     pattern_c = multi_matched[
                         (multi_matched['目付_旧_float'] >= min_w) &
                         (multi_matched['目付_旧_float'] <= max_w)
                     ].copy()
-                    pattern_c['パターン'] = 'メーカー名称+タイプ+目付'
-                    all_matches.append(pattern_c)
+                    
+                    if not pattern_c.empty:
+                        matched_df = pattern_c
+                        pattern_name = 'メーカー名称+タイプ+目付'
                 except KeyError:
-                    pass # 候補なし
-
-        # パターンD: メーカー名称+タイプのみ
-        if new_maker_name and new_type:
+                    pass
+        
+        # パターンD: メーカー名称+タイプのみ（A, B, Cがなければ）
+        if matched_df is None and new_maker_name and new_type:
             try:
-                # 操作: 複合キー（メーカー名称, タイプコード）でインデックス検索（高速）。
-                # 理由: 目付を無視して、複合キーが一致するすべての候補を取得するため。
                 pattern_d = df_old_multi_indexed.loc[(new_maker_name, new_type)].copy()
                 if isinstance(pattern_d, pd.Series):
                     pattern_d = pattern_d.to_frame().T
-                pattern_d['パターン'] = 'メーカー名称+タイプのみ'
-                all_matches.append(pattern_d)
+                
+                if not pattern_d.empty:
+                    matched_df = pattern_d
+                    pattern_name = 'メーカー名称+タイプのみ'
             except KeyError:
-                pass # 候補なし
+                pass
         
-        if all_matches:
-            # 理由: 各パターンで抽出された候補を結合し、重複（JANコード_旧）を削除する。
-            combined = pd.concat(all_matches, ignore_index=True)
-            combined = combined.drop_duplicates(subset=['JANコード_旧'])
+        # ===== 候補品リスト作成 =====
+        if matched_df is not None and not matched_df.empty:
+            matched_df = matched_df.drop_duplicates(subset=['JANコード_旧'])
+            
+            # メーカー名称を補完
+            if 'メーカー名称_旧' not in matched_df.columns:
+                maker_info = df_old_original[['JANコード_旧', 'メーカー名称_旧']].drop_duplicates()
+                matched_df = matched_df.merge(maker_info, on='JANコード_旧', how='left')
             
             # 類似度計算
             similarities = [
                 (calculate_similarity(new_name, row.get('商品名称（カナ）_旧', '')), row)
-                for _, row in combined.iterrows()
+                for _, row in matched_df.iterrows()
             ]
-            # 理由: 類似度の高い順に並び替える。
             similarities.sort(key=lambda x: x[0], reverse=True)
             
-            # 理由: 候補品リストシート用に、必要な情報を整形してリストに追加する。
             for score, old_row in similarities:
                 candidates_list.append({
                     '旧候補JANコード': old_row.get('JANコード_旧', ''),
                     '旧候補商品名': old_row.get('商品名称（カナ）_旧', ''),
+                    '旧商品名称（漢字）': old_row.get('商品名称（漢字）_旧', ''),
                     '旧メーカー名称': old_row.get('メーカー名称_旧', ''),
-                    '旧標準分類名(クラス)': old_row.get('標準分類名(クラス)_旧', ''),
+                    '旧標準分類名(タイプ)': old_row.get('標準分類名(タイプ)_旧', ''),  # タイプに変更
                     '旧ブランド名称': old_row.get('ブランド名称_旧', ''),
                     '旧目付': old_row.get('目付_旧', ''),
-                    '旧発売日': old_row.get('発売日_旧', ''),
+                    '旧幅': old_row.get('幅_旧', ''),
+                    '旧高さ': old_row.get('高さ_旧', ''),
+                    '旧奥行': old_row.get('奥行_旧', ''),
                     '類似度': f'{score:.1%}',
                     '新JANコード': new_jan,
                     '新商品名': new_name,
+                    '新商品名漢字': new_kanji,
                     '新メーカー名称': new_maker_name_val,
-                    '新標準分類名(クラス)': new_class,
+                    '新標準分類名(タイプ)': new_type_name,  # タイプに変更
                     '新ブランド名称': new_brand_name,
                     '新目付': new_weight,
-                    'パターン': old_row.get('パターン', ''),
+                    '新発売日': new_release,
+                    '新幅': new_wide,
+                    '新高さ': new_height,
+                    '新奥行': new_length,
+                    'パターン': pattern_name,
                 })
     
     return candidates_list
