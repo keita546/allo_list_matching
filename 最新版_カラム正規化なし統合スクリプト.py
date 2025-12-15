@@ -39,7 +39,7 @@ OUTPUT_COLUMNS_CSV = REQUIRED_COLUMNS
 # ファイル読み込み
 # ========================================================================
 
-def load_file_flexible(file_path: str, sheet_name: str = '確定') -> pd.DataFrame:
+def load_file_flexible(file_path: str, sheet_name: str = None) -> pd.DataFrame:
     """CSV/TSV/Excelを自動判別して読み込み"""
     p = Path(file_path)
     ext = p.suffix.lower()
@@ -49,13 +49,21 @@ def load_file_flexible(file_path: str, sheet_name: str = '確定') -> pd.DataFra
     # Excel
     if ext in ['.xlsx', '.xls', '.xlsm']:
         try:
+            # sheet_nameがNoneの場合は最初のシート（0）を読み込む
+            if sheet_name is None:
+                sheet_name = 0
+            
             df = pd.read_excel(file_path, sheet_name=sheet_name, engine='openpyxl', dtype=str)
-            print(f"✅ Excel読み込み成功（シート: {sheet_name}）")
+            
+            if sheet_name == 0:
+                print(f"✅ Excel読み込み成功（最初のシート）")
+            else:
+                print(f"✅ Excel読み込み成功（シート: {sheet_name}）")
             return df
         except Exception as e:
             raise ValueError(f"Excel読み込みエラー: {e}")
     
-    # CSV/TSV
+    # CSV/TSV（変更なし）
     encodings = ['utf-8', 'shift_jis', 'cp932']
     delimiter_map = {'.csv': ',', '.tsv': '\t', '.txt': '\t'}
     
@@ -74,6 +82,7 @@ def load_file_flexible(file_path: str, sheet_name: str = '確定') -> pd.DataFra
             continue
     
     raise UnicodeDecodeError(f"すべてのエンコーディングで読み込み失敗")
+
 
 
 # ========================================================================
@@ -307,7 +316,7 @@ def merge_and_deduplicate(existing_df: pd.DataFrame,
     """
     4段階の優先順位付き統合・重複削除
     
-    優先順位: 累積（既存） > 花王 > プラネット > マッチング
+    優先順位: 花王・プラネット > 今週マッチング > 累積マッチング
     """
     print("\n📦 データ統合・重複削除開始...")
     
@@ -332,6 +341,36 @@ def merge_and_deduplicate(existing_df: pd.DataFrame,
         removed = before - len(matching_df)
         if removed > 0:
             print(f"  ✂️ マッチング→累積内花王・プラネット重複削除: {removed}件")
+    
+    # ステップ2.5: 今週マッチングと「完全一致」する累積内マッチングを削除
+    if not existing_df.empty and not matching_df.empty and 'データソース' in existing_df.columns:
+        # 累積内のマッチングデータのみを抽出（先に分離）
+        mask_matching = existing_df['データソース'] == 'マッチング'
+        existing_matching = existing_df[mask_matching].copy()
+        existing_others = existing_df[~mask_matching].copy()
+        
+        # 今週マッチングのレコード（旧JAN+新JANのペア）
+        this_week_pairs = set(zip(matching_df['旧JANコード'], matching_df['新JANコード']))
+        
+        # マッチングデータから「旧JAN+新JANのペア」が今週と一致するものを削除
+        if not existing_matching.empty and len(this_week_pairs) > 0:
+            before = len(existing_matching)
+            existing_pairs = set(zip(existing_matching['旧JANコード'], existing_matching['新JANコード']))
+            duplicate_pairs = existing_pairs & this_week_pairs  # 重複ペア
+            
+            if duplicate_pairs:
+                mask_keep = ~existing_matching.apply(
+                    lambda row: (row['旧JANコード'], row['新JANコード']) in duplicate_pairs, 
+                    axis=1
+                )
+                existing_matching = existing_matching[mask_keep].copy()
+                
+                removed = before - len(existing_matching)
+                print(f"  ✂️ 累積内マッチング→今週マッチング完全一致削除: {removed}件")
+                print(f"     （花王・プラネットは保護されています）")
+        
+        # 花王・プラネット + 重複削除後マッチングを再結合
+        existing_df = pd.concat([existing_others, existing_matching], ignore_index=True)
     
     # ステップ3: 今週の花王・プラネットとマッチングの重複削除
     new_kao_planet_df = pd.concat([kao_df, planet_df], ignore_index=True)
@@ -386,7 +425,7 @@ def main():
     
     existing_df = pd.DataFrame()
     
-    if messagebox.askyesno("累積リスト", "前週の累積リストがありますか？\n（初回は「いいえ」）"):
+    if messagebox.askyesno("累積リスト", "前週の累積リスト(.xlsx)がありますか？\n（初回は「いいえ」）"):
         existing_path = filedialog.askopenfilename(
             title="前週の累積リストを選択",
             filetypes=[("Excel/CSV", "*.xlsx *.csv"), ("すべて", "*.*")]
@@ -394,7 +433,7 @@ def main():
         
         if existing_path:
             try:
-                existing_df = load_file_flexible(existing_path)
+                existing_df = load_file_flexible(existing_path)  # sheet_name=Noneがデフォルト
                 existing_df = clean_jan_codes(existing_df)
                 print(f"✅ 累積リスト読み込み: {len(existing_df)}件")
             except Exception as e:
@@ -426,7 +465,7 @@ def main():
         return
     
     try:
-        matching_df = load_file_flexible(matching_path)
+        matching_df = load_file_flexible(matching_path, sheet_name='確定')
         matching_df = normalize_columns(matching_df, file_type='matching')
         matching_df = add_metadata(
             matching_df, 
