@@ -25,29 +25,19 @@ def calculate_similarity(s1: str, s2: str) -> float:
 
 
 def load_data(file_path: str, suffix: str) -> pd.DataFrame:
-    # 目的: 指定されたファイルを読み込み、DataFrameに変換する。
-    # 理由: CSV, TSV, Excelのどれでも読み込めるようにし、データの形式を統一して後続の処理でエラーが出ないようにするため。
     p = Path(file_path)
     ext = p.suffix.lower()
     
     try:
         if ext == '.csv':
-            # 操作: UTF-8でCSVを読み込む。
-            # 理由: 標準的なエンコーディングであるUTF-8でまず試行する。
             df = pd.read_csv(file_path, encoding='utf-8', delimiter=',', on_bad_lines='skip')
         elif ext == '.tsv':
-            # 操作: TSV（タブ区切り）をUTF-8で読み込む。
-            # 理由: TSVファイルにも対応するため。
             df = pd.read_csv(file_path, encoding='utf-8', delimiter='\t', on_bad_lines='skip')
         elif ext in ['.xlsx', '.xls']:
-            # 操作: Excelファイルを読み込む。
-            # 理由: Excel形式のデータも直接扱えるようにするため。
             df = pd.read_excel(file_path)
         else:
             raise ValueError(f"サポート外のファイル形式です:{ext}")
     except UnicodeDecodeError:
-        # 操作: UTF-8で失敗した場合、Shift-JISで再試行する。
-        # 理由: 日本で使われる古いCSVファイルはShift-JISでエンコードされがちなので、エラー回避のために自動で切り替える。
         if ext == '.csv':
             df = pd.read_csv(file_path, encoding='shift_jis', delimiter=',', on_bad_lines='skip')
         elif ext == '.tsv':
@@ -55,9 +45,13 @@ def load_data(file_path: str, suffix: str) -> pd.DataFrame:
         else:
             raise
     
-    # 操作: データ内の「NULL」という文字列をPandasの欠損値(NA)に置き換える。
-    # 理由: 欠損値のチェック（pd.isna）を正確に行えるようにするため。
-    df = df.replace('NULL', pd.NA)
+    # ★★★ NULL文字列を欠損値に置き換え（複数パターン対応）★★★
+    df = df.replace(['NULL', 'null', 'Null', '', 'nan'], pd.NA)
+    
+    # ★★★ さらに確実にするため、文字列型カラムを個別処理 ★★★
+    for col in df.columns:
+        if df[col].dtype == 'object':  # 文字列型のみ
+            df[col] = df[col].replace(['NULL', 'null', 'Null', ''], pd.NA)
     
     required_cols = [
         'メーカーコード', 'ブランドコード', '標準分類コード(タイプ)',
@@ -65,14 +59,10 @@ def load_data(file_path: str, suffix: str) -> pd.DataFrame:
         '商品名称（カナ）', 'JANコード', 'メーカー名称',
     ]
     
-    # 操作: 必要なカラムがない場合、空のカラムを追加する。
-    # 理由: 新旧マスタでカラム名が揃っていなくても、後続の処理に進めるようにするため。
     for col in required_cols:
         if col not in df.columns:
             df[col] = pd.NA 
     
-    # 操作: 全てのカラム名に接尾辞（_新, _旧）を付ける。
-    # 理由: 新マスタと旧マスタのデータを結合したときに、どのデータか区別できるようにするため。
     df = df.add_suffix(suffix)
     return df
 
