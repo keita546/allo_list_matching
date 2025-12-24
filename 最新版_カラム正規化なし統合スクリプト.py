@@ -427,7 +427,7 @@ def main():
     
     if messagebox.askyesno("累積リスト", "前週の累積リスト(.xlsx)がありますか？\n（初回は「いいえ」）"):
         existing_path = filedialog.askopenfilename(
-            title="前週の累積リストを選択",
+            title="前週の累積リスト(.xlsx)を選択",
             filetypes=[("Excel/CSV", "*.xlsx *.csv"), ("すべて", "*.*")]
         )
         
